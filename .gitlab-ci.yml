@@ -1,0 +1,139 @@
+stages:
+  - scan
+
+.scan-rules:
+  rules:
+    - if: >-
+        ($CI_PIPELINE_SOURCE == "merge_request_event" &&
+         $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID) ||
+        ($CI_PIPELINE_SOURCE == "push" &&
+         $CI_COMMIT_BRANCH &&
+         !$CI_OPEN_MERGE_REQUESTS)
+
+sonarcloud-check:
+  extends: .scan-rules
+  stage: scan
+
+  image:
+    name: sonarsource/sonar-scanner-cli:11.5.0.2154_7.3.0
+    entrypoint: [""]
+
+  variables:
+    GIT_DEPTH: "0"
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+
+  interruptible: true
+  allow_failure: false
+  timeout: 15m
+
+  before_script:
+    - 'test -n "$SONAR_TOKEN" || { echo "Missing SONAR_TOKEN"; exit 1; }'
+    - 'test -n "$KONG_PROJECT_KEY" || { echo "Missing KONG_PROJECT_KEY"; exit 1; }'
+    - 'test -n "$SONAR_ORGANIZATION_KEY" || { echo "Missing SONAR_ORGANIZATION_KEY"; exit 1; }'
+
+  script:
+    - >
+      sonar-scanner
+      -Dsonar.projectKey="${KONG_PROJECT_KEY}"
+      -Dsonar.organization="${SONAR_ORGANIZATION_KEY}"
+      -Dsonar.sources=.
+      -Dsonar.sourceEncoding=UTF-8
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.qualitygate.timeout=300
+
+snyk-iac-check:
+  extends: .scan-rules
+  stage: scan
+
+  image:
+    name: node:22-bookworm
+    entrypoint: [""]
+
+  interruptible: true
+  allow_failure: false
+  timeout: 15m
+
+  before_script:
+    - 'test -n "$SNYK_TOKEN" || { echo "Missing SNYK_TOKEN"; exit 1; }'
+    - npm install --global snyk
+
+  script:
+    - >
+      snyk iac test .
+      --severity-threshold=high
+      --report
+      --target-reference="$CI_COMMIT_REF_NAME"
+      --remote-repo-url="$CI_PROJECT_URL"
+      --json-file-output=snyk-iac-report.json
+
+  artifacts:
+    when: always
+    paths:
+      - snyk-iac-report.json
+    expire_in: 7 days
+
+owasp-zap-check:
+  extends: .scan-rules
+  stage: scan
+
+  image:
+    name: ghcr.io/zaproxy/zaproxy:stable
+    entrypoint: [""]
+
+  interruptible: true
+  allow_failure: false
+  timeout: 15m
+
+  before_script:
+    - 'test -n "$ZAP_TARGET_URL" || { echo "Missing ZAP_TARGET_URL"; exit 1; }'
+    - mkdir -p /zap/wrk
+
+  script:
+    - |
+      scan_status=0
+
+      zap-baseline.py \
+        -t "$ZAP_TARGET_URL" \
+        -r zap-report.html \
+        -J zap-report.json \
+        -m 1 || scan_status=$?
+
+      cp /zap/wrk/zap-report.* "$CI_PROJECT_DIR/" || true
+
+      exit "$scan_status"
+
+  artifacts:
+    when: always
+    paths:
+      - zap-report.html
+      - zap-report.json
+    expire_in: 7 days
+
+gitleaks-check:
+  extends: .scan-rules
+  stage: scan
+
+  image:
+    name: zricethezav/gitleaks:v8.24.3
+    entrypoint: [""]
+
+  variables:
+    GIT_DEPTH: "0"
+
+  interruptible: true
+  allow_failure: false
+  timeout: 15m
+
+  script:
+    - >
+      gitleaks git .
+      --redact
+      --report-format=json
+      --report-path=gitleaks-report.json
+      --exit-code=1
+
+  artifacts:
+    when: always
+    paths:
+      - gitleaks-report.json
+    expire_in: 7 days
